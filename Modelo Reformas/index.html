@@ -1099,8 +1099,9 @@ async function init3D() {
   const site = new THREE.Group(); scene.add(site);
 
   /* ---------- Parcela: césped, camino, setos, piscina ---------- */
-  const farGrass = new THREE.MeshStandardMaterial({ color: '#5F7A47', roughness: 1, map: tex('leafy_grass', 'diff', true).clone() });
-  farGrass.map.repeat.set(120, 120);
+  const farTex = texLoader.load(`${PH}/Textures/jpg/1k/leafy_grass/leafy_grass_diff_1k.jpg`);
+  farTex.wrapS = farTex.wrapT = THREE.RepeatWrapping; farTex.colorSpace = THREE.SRGBColorSpace; farTex.repeat.set(120, 120);
+  const farGrass = new THREE.MeshStandardMaterial({ color: '#5F7A47', roughness: 1, map: farTex });
   const groundDisc = new THREE.Mesh(new THREE.CircleGeometry(160, 64), farGrass);
   groundDisc.rotation.x = -Math.PI / 2; groundDisc.position.y = -0.37; groundDisc.receiveShadow = true; site.add(groundDisc);
   scene.fog = new THREE.Fog('#6E6A5E', 45, 160);
