@@ -893,8 +893,16 @@ async function init3D() {
   }
   const useModel = !!gltfScene;
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, isMobile ? 1.75 : 2));
+  // Rendimiento: resolución limitada (y adaptativa más abajo); el antialias solo en pantallas de baja densidad
+  const renderer = new THREE.WebGLRenderer({ antialias: devicePixelRatio < 1.5, powerPreference: 'high-performance' });
+  const PR_MAX = Math.min(devicePixelRatio, 1.5), PR_MIN = isMobile ? 0.75 : 1;
+  let pixelRatio = PR_MAX;
+  renderer.setPixelRatio(pixelRatio);
+  renderer.shadowMap.autoUpdate = false;      // las sombras solo se recalculan cuando algo cambia
+  renderer.shadowMap.needsUpdate = true;
+  // Render bajo demanda: solo se dibuja cuando la cámara se mueve o algo cambia
+  let invalidate = 3;
+  function redraw(n = 2, shadows = false) { invalidate = Math.max(invalidate, n); if (shadows) renderer.shadowMap.needsUpdate = true; }
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -977,7 +985,8 @@ async function init3D() {
   sun.shadow.bias = -0.0003; sun.shadow.normalBias = 0.025; sun.shadow.radius = 3;
   scene.add(sun);
   const warm = (x, y, z, i = 7) => { const l = new THREE.PointLight('#FFC285', i, 8, 2); l.position.set(x, y, z); scene.add(l); };
-  if (!useModel) warm(-3.5, 2.6, -2), warm(2.6, 2.7, 2.4), warm(2.6, 2.7, -2.6), warm(-4, 5.7, -2.2, 5), warm(0, 5.7, -1.5, 5), warm(4, 5.5, -1.8, 5);
+  // Interior: 2 luces cálidas (antes 6). El cielo HDRI ya ilumina el resto; cada luz extra encarece cada píxel.
+  if (!useModel) warm(1, 2.7, 0, 9), warm(-1.5, 5.7, -1.5, 7);
 
   /* ---------- Materiales PBR ---------- */
   const T = {};
@@ -1241,8 +1250,8 @@ async function init3D() {
     ['modern_coffee_table_01', 'gf', 2.6, 0.02, 2.35, 0],
     ['mid_century_lounge_chair', 'gf', 4.7, 0.02, 2.2, -120],
     ['side_table_01', 'gf', 0.85, 0.02, 3.7, 0],
-    ['potted_plant_02', 'gf', 5.45, 0.02, 4.0, 0],
-    ['potted_plant_02', 'gf', 5.45, 0.02, -4.0, 60],
+    ['potted_plant_02', 'gf', 5.45, 0.02, 4.0, 0, { deco: true }],
+    ['potted_plant_04', 'gf', 5.45, 0.02, -4.0, 60],
     ['wooden_table_02', 'gf', 2.6, 0.02, -2.6, 90],
     ['dining_chair_02', 'gf', 2.1, 0.02, -1.85, 180],
     ['dining_chair_02', 'gf', 3.1, 0.02, -1.85, 180],
@@ -1253,7 +1262,7 @@ async function init3D() {
     ['bar_chair_round_01', 'gf', -4.1, 0.02, -1.15, 0],
     ['bar_chair_round_01', 'gf', -3.4, 0.02, -1.15, 0],
     ['bar_chair_round_01', 'gf', -2.7, 0.02, -1.15, 0],
-    ['ceramic_vase_01', 'gf', -2.9, 0.93, -2.0, 0],
+    ['ceramic_vase_01', 'gf', -2.9, 0.93, -2.0, 0, { deco: true }],
     ['potted_plant_04', 'gf', -1.3, 0.79, 3.5, 0],
     ['side_table_01', 'uf', -1.4, Y2 + 0.02, -4.1, 0],
     ['side_table_01', 'uf', 1.4, Y2 + 0.02, -4.1, 0],
@@ -1264,9 +1273,9 @@ async function init3D() {
     ['outdoor_table_chair_set_01', 'uf', 4.1, Y2 + 0.03, -1.9, 0],
     ['planter_box_01', 'uf', 5.6, Y2 + 0.03, 2.2, 90],
     ['planter_box_01', 'uf', 5.6, Y2 + 0.03, 3.8, 90],
-    ['potted_plant_02', 'uf', 2.5, Y2 + 0.03, 4.1, 0],
-    ['potted_plant_02', 'site', -2.4, -0.33, 5.3, 0],
-    ['potted_plant_02', 'site', -4.6, -0.33, 5.3, 90],
+    ['potted_plant_04', 'uf', 2.5, Y2 + 0.03, 4.1, 0],
+    ['potted_plant_04', 'site', -2.4, -0.33, 5.3, 0],
+    ['potted_plant_04', 'site', -4.6, -0.33, 5.3, 90],
   ];
 
   /* ---------- Modelo real: encaje en escena, sombras y plano de corte por planta ---------- */
@@ -1326,6 +1335,36 @@ async function init3D() {
     }
     return out;
   }
+
+  /* ---------- Rendimiento: fusiona las piezas estáticas que comparten material ----------
+     (cientos de cajas → unas pocas decenas de llamadas de dibujo) */
+  const { mergeGeometries } = await import('three/addons/utils/BufferGeometryUtils.js');
+  function mergeGroup(g) {
+    const buckets = new Map();
+    for (const m of [...g.children]) {
+      if (!m.isMesh) continue;
+      const key = m.material.uuid + '|' + m.castShadow;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(m);
+    }
+    for (const list of buckets.values()) {
+      if (list.length < 2) continue;
+      const geos = list.map((m) => {
+        m.updateMatrix();
+        const gg = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+        return gg.applyMatrix4(m.matrix);
+      });
+      const merged = mergeGeometries(geos, false);
+      geos.forEach((gg) => gg.dispose());
+      if (!merged) continue;
+      const mesh = new THREE.Mesh(merged, list[0].material);
+      mesh.castShadow = list[0].castShadow; mesh.receiveShadow = true;
+      list.forEach((m) => { g.remove(m); m.geometry.dispose(); });
+      g.add(mesh);
+    }
+  }
+  if (!useModel) Object.values(G).forEach(mergeGroup);
+  mergeGroup(site);
 
   /* ---------- Fundidos por grupo (para "abrir" la casa) ---------- */
   const faders = {};
@@ -1545,7 +1584,10 @@ async function init3D() {
     const w = host.clientWidth, h = host.clientHeight;
     renderer.setSize(w, h); labelRenderer.setSize(w, h);
     camera.aspect = w / h; camera.updateProjectionMatrix();
+    redraw();
   };
+  controls.addEventListener('change', () => redraw(1));
+  manager.onProgress = (_u, loaded, total) => { $('#loader-pct').textContent = Math.round((loaded / total) * 100) + ' %'; redraw(); };
   new ResizeObserver(resize).observe(host); resize();
 
   /* ---------- Bucle ---------- */
@@ -1557,8 +1599,10 @@ async function init3D() {
     requestAnimationFrame(tick);
     const dt = Math.min(clock.getDelta(), 0.05);
     if (paused) return;
+    let active = false;
 
     if (flight) {
+      active = true;
       flight.t = (performance.now() - flight.start) / 1000 / flight.dur;   // basado en reloj real
       const k = ease(Math.min(1, flight.t));
       camera.position.lerpVectors(flight.p0, flight.p1, k);
@@ -1566,9 +1610,13 @@ async function init3D() {
       if (flight.t >= 1) { const done = flight.done; flight = null; controls.enabled = true; done && done(); }
     }
     for (const f of Object.values(faders)) {
-      if (Math.abs(f.v - f.to) > 0.002) { f.v += (f.to - f.v) * Math.min(1, dt * 5); if (Math.abs(f.v - f.to) <= 0.002) f.v = f.to; applyFade(f); }
+      if (Math.abs(f.v - f.to) > 0.002) {
+        f.v += (f.to - f.v) * Math.min(1, dt * 5); if (Math.abs(f.v - f.to) <= 0.002) f.v = f.to;
+        applyFade(f); active = true; renderer.shadowMap.needsUpdate = true;
+      }
     }
     if (zoomAnim) {
+      active = true;
       if (flight) zoomAnim = null;
       else {
         const k = ease(Math.min(1, (performance.now() - zoomAnim.start) / 400));
@@ -1576,7 +1624,10 @@ async function init3D() {
         if (k >= 1) zoomAnim = null;
       }
     }
-    if (useModel && Math.abs(clipPlane.constant - clipTo) > 0.005) clipPlane.constant += (clipTo - clipPlane.constant) * Math.min(1, dt * 4);
+    if (useModel && Math.abs(clipPlane.constant - clipTo) > 0.005) {
+      clipPlane.constant += (clipTo - clipPlane.constant) * Math.min(1, dt * 4);
+      active = true; renderer.shadowMap.needsUpdate = true;
+    }
     if (pointerDirty && !flight) {
       pointerDirty = false;
       const k = pick();
@@ -1584,23 +1635,39 @@ async function init3D() {
     }
     for (const [k, r] of Object.entries(ROOM3D)) {
       const target = k === hovered || k === inRoom ? 1 : 0;
-      r.hot += (target - r.hot) * Math.min(1, dt * 8);
+      const diff = target - r.hot;
+      if (Math.abs(diff) > 0.003) { active = true; r.hot += diff * Math.min(1, dt * 8); } else r.hot = target;
       const base = k === 'fachada' ? 0 : 0.22;
       r.edges.material.opacity = base + r.hot * 0.75;
       r.glow.material.opacity = r.hot * 0.22;
       r.pin.btn.classList.toggle('is-hot', r.hot > 0.5);
     }
     if (STAIRS) {
-      STAIRS.hot += ((hovered === '__stairs' ? 1 : 0) - STAIRS.hot) * Math.min(1, dt * 8);
+      const diff = (hovered === '__stairs' ? 1 : 0) - STAIRS.hot;
+      if (Math.abs(diff) > 0.003) { active = true; STAIRS.hot += diff * Math.min(1, dt * 8); } else STAIRS.hot += diff;
       STAIRS.edges.material.opacity = 0.22 + STAIRS.hot * 0.75;
       STAIRS.up.btn.classList.toggle('is-hot', STAIRS.hot > 0.5);
       STAIRS.down.btn.classList.toggle('is-hot', STAIRS.hot > 0.5);
     }
-    controls.update();
+    const moved = controls.update();
     controls.target.clamp(tmin, tmax);
+    if (!(moved || active || controls.autoRotate || invalidate > 0)) { frames = 0; return; }   // nada cambió: no se dibuja
+    if (invalidate > 0) invalidate--;
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
+
+    // Resolución adaptativa: si va por debajo de ~40 fps, baja la resolución interna
+    frames++; frameTime += dt;
+    if (frames >= 45) {
+      if (frameTime / frames > 1 / 40 && pixelRatio > PR_MIN) {
+        pixelRatio = Math.max(PR_MIN, pixelRatio - 0.25);
+        renderer.setPixelRatio(pixelRatio); resize();
+      }
+      frames = 0; frameTime = 0;
+    }
   }
+  let frames = 0, frameTime = 0;
+  if (/[?&]debug/.test(location.search)) window.__casa = { renderer, scene, camera };   // diagnóstico: index.html?debug
 
   /* ---------- Arranque ---------- */
   setMode('exterior', { fly: false });
@@ -1627,6 +1694,7 @@ async function init3D() {
       f.meshes.push(o);
     });
     applyFade(f);
+    redraw(2, true);
   }
   async function loadFurniture() {
     const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
@@ -1638,6 +1706,7 @@ async function init3D() {
     const get = (id) => (cache[id] ||= loader.loadAsync(`${PH}/Models/gltf/1k/${id}/${id}_1k.gltf`)
       .then((g) => g.scene).catch((e) => { console.warn('[Casa 3D] Mueble no disponible:', id, e); return null; }));
     await Promise.all(FURN.map(async ([id, grp, x, y, z, rot = 0, opt = {}]) => {
+      if (opt.deco && isMobile) return;   // en móvil se omiten los adornos más pesados
       const src = await get(id); if (!src) return;
       const o = src.clone(true);
       o.rotation.y = THREE.MathUtils.degToRad(rot);
